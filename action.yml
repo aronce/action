@@ -1,0 +1,132 @@
+name: Aronce
+description: Review pull requests, fix failing CI, or run any task with Aronce. Every change comes back verified.
+author: Aronce
+branding:
+  icon: check-circle
+  color: gray-dark
+
+inputs:
+  token:
+    description: An Aronce API token (Organization Settings > API tokens). Store it as a secret, e.g. ARONCE_TOKEN.
+    required: true
+  mode:
+    description: "review (a pull request), ci (make failing checks pass) or exec (any prompt)."
+    required: false
+    default: review
+  prompt:
+    description: What to do, for mode exec.
+    required: false
+    default: ""
+  pull-request:
+    description: The pull request number to review. Defaults to the one that triggered the workflow.
+    required: false
+    default: ${{ github.event.pull_request.number }}
+  branch:
+    description: "The branch to work on (ci: the branch whose checks failed; exec: the base branch). Defaults to the repository's default branch."
+    required: false
+    default: ""
+  deliver:
+    description: "Once verified, deliver without waiting for a person: post the review (review), or open the pull request (ci, exec)."
+    required: false
+    default: "true"
+  budget:
+    description: Credit limit for the run. Defaults to the project's policy.
+    required: false
+    default: ""
+  repository:
+    description: owner/name of the repository in Aronce. Defaults to this one.
+    required: false
+    default: ${{ github.repository }}
+  api-url:
+    description: The Aronce API.
+    required: false
+    default: https://api.aronce.ai/api/v1
+  installer-url:
+    description: Where the CLI installer is served.
+    required: false
+    default: https://app.aronce.ai/cli
+
+outputs:
+  mission-id:
+    description: The run's id in Aronce.
+    value: ${{ steps.run.outputs.mission-id }}
+  status:
+    description: "Where the run ended: delivered, awaiting_approval, plan_ready, failed, cancelled, needs_input or paused."
+    value: ${{ steps.run.outputs.status }}
+  verified:
+    description: "true when the change was verified (or the review completed)."
+    value: ${{ steps.run.outputs.verified }}
+  pull-request-url:
+    description: The pull request Aronce opened, if any.
+    value: ${{ steps.run.outputs.pull-request-url }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install the Aronce CLI
+      shell: bash
+      run: |
+        curl -fsSL "${{ inputs.installer-url }}" | sh
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Run Aronce
+      id: run
+      shell: bash
+      env:
+        ARONCE_TOKEN: ${{ inputs.token }}
+        ARONCE_API_URL: ${{ inputs.api-url }}
+        MODE: ${{ inputs.mode }}
+        PROMPT: ${{ inputs.prompt }}
+        PR: ${{ inputs.pull-request }}
+        BRANCH: ${{ inputs.branch }}
+        DELIVER: ${{ inputs.deliver }}
+        BUDGET: ${{ inputs.budget }}
+        REPO: ${{ inputs.repository }}
+      run: |
+        set +e
+        args=(--repo "$REPO" --output json)
+        [ -n "$BUDGET" ] && args+=(--budget "$BUDGET")
+        [ "$DELIVER" = "true" ] && args+=(--deliver)
+        case "$MODE" in
+          review)
+            [ -z "$PR" ] && { echo "::error::mode review needs a pull request (run on pull_request, or set pull-request)."; exit 2; }
+            aronce review "$PR" "${args[@]}" > aronce-result.json ;;
+          ci)
+            [ -n "$BRANCH" ] && args+=(--branch "$BRANCH")
+            aronce ci "${args[@]}" > aronce-result.json ;;
+          exec)
+            [ -z "$PROMPT" ] && { echo "::error::mode exec needs a prompt."; exit 2; }
+            [ -n "$BRANCH" ] && args+=(--branch "$BRANCH")
+            printf '%s' "$PROMPT" | aronce exec - "${args[@]}" > aronce-result.json ;;
+          *) echo "::error::mode must be review, ci or exec."; exit 2 ;;
+        esac
+        code=$?
+        python3 - "$code" <<'PY'
+        import json, os, sys
+        code = int(sys.argv[1])
+        try:
+            mission = json.loads(open("aronce-result.json").read().strip().splitlines()[-1])["mission"]
+        except Exception:
+            mission = {}
+        status = mission.get("status", "error")
+        verified = status in ("delivered", "awaiting_approval")
+        with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+            out.write(f"mission-id={mission.get('uid', '')}\nstatus={status}\nverified={'true' if verified else 'false'}\n"
+                      f"pull-request-url={mission.get('pull_request_url') or ''}\n")
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+            summary.write(f"### Aronce: {mission.get('title', 'run')}\n\n| | |\n|---|---|\n| Status | {status.replace('_', ' ')} |\n"
+                          f"| Credits | {mission.get('cost_credits', 0)} of {mission.get('budget_credits', '?')} |\n")
+            if mission.get("pull_request_url"):
+                summary.write(f"| Pull request | {mission['pull_request_url']} |\n")
+            if mission.get("failure_reason"):
+                summary.write(f"| Why | {mission['failure_reason']} |\n")
+        if status in ("needs_input", "paused"):
+            print(f"::warning::Aronce is waiting on you ({status.replace('_', ' ')}). Open the run in Aronce to continue.")
+        PY
+        # 0 verified or delivered · 1 failed · 3 cancelled · 5 waiting on you (not a failure) · 2/4 setup or network
+        [ "$code" = "5" ] && exit 0
+        exit "$code"

@@ -1,0 +1,17 @@
+# When CI fails on main, Aronce finds the cause and opens a verified pull request with the fix.
+name: Aronce CI fixer
+on:
+  workflow_run:
+    workflows: [CI]  # the name of your CI workflow
+    types: [completed]
+    branches: [main]
+jobs:
+  fix:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aronce/action@v1
+        with:
+          token: ${{ secrets.ARONCE_TOKEN }}
+          mode: ci
+          branch: ${{ github.event.workflow_run.head_branch }}

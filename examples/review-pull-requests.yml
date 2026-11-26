@@ -1,0 +1,14 @@
+# Review every pull request with Aronce: it runs the checks, reviews the change and posts the findings.
+name: Aronce review
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aronce/action@v1
+        with:
+          token: ${{ secrets.ARONCE_TOKEN }}
+          mode: review

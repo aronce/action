@@ -1,0 +1,18 @@
+# Any task on a schedule: here, nightly tests for recent changes, delivered as a pull request.
+name: Aronce nightly tests
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aronce/action@v1
+        id: aronce
+        with:
+          token: ${{ secrets.ARONCE_TOKEN }}
+          mode: exec
+          prompt: Add focused tests for the code that changed in the last day with the weakest coverage. Don't change application code.
+      - run: echo "Aronce opened ${{ steps.aronce.outputs.pull-request-url }}"
+        if: ${{ steps.aronce.outputs.pull-request-url != '' }}
